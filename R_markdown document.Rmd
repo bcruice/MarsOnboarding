@@ -1,0 +1,158 @@
+---
+title: "Hello World - pwdgsi, performance metrics, and me"
+author: "Brian cruice"
+date: "`r lubridate::now()`"
+output: html_document
+params:
+  database: "PostgreSQL35W"
+  write: TRUE
+---
+```{r setup, include=FALSE}
+#Database Stuff
+library(odbc)
+library(tidyverse)
+library(lubridate)
+library(pwdgsi)
+library(sf)
+library(padr)
+#Other stuff
+library(knitr)
+options(stringsAsFactors=FALSE)
+```
+
+## R Markdown
+
+Working in R markdown is a familiar experience, even if my skills are a _bit_ rusty. Today we'll be reviewing some data in the **iris** data set including in R, primarily through the use of the **dplyr** and **ggplot** packages, which are a part of the larger **tidyverse** set of packages. Below are a few simple plots of the data without any manipulation.
+
+### Iris Plots
+```{r, echo = FALSE}
+iris.box <- ggplot(iris, aes(x = Species, y = Petal.Length)) + geom_boxplot()
+iris.width.plot <- ggplot(iris, aes(x= Sepal.Width, y = Petal.Width, col = Species)) + geom_point()
+
+iris.box
+iris.width.plot
+```
+
+### Iris Data Manipulation
+```{r, echo = FALSE}
+
+```
+
+
+## Working with pwdgsi and dplyr
+Working with pwdgsi, we are able to grab data from several tables within the **mars_testing** database and save them as lists or database objects in R.
+
+### Running pwdgsi Functions
+```{r Section 0 - Preamble and database connections, include=FALSE}
+###Section 0.1: Check parameter validity
+	if(!(params$database %in% c("PostgreSQL35W","mars", "mars_testing"))){
+		stop(paste("Invalid database parameter:", params$database))
+	}
+###Section 0.2: Connect to the database
+	#Indicate the database name: mars_testing or mars. 
+	#Only write to mars if you really know what you're doing.
+	mars<- dbConnect(odbc::odbc(), params$database)
+	
+```
+Below is the beginning of the level data for 250-1-1 during the period of 01/01/2019 to 09/01/2021. This is one of three dataframes created by queries to the **mars_testing** database performed by the function **marsFetchMonitoringData**.
+```{r, echo = FALSE}
+
+#Set paramters
+
+#set parameters
+smpId <- "250-1-1"
+owId <- "OW1"
+start_date <- as.POSIXct("2019-01-01")
+end_date <- as.POSIXct("2021-09-01")
+
+#use existing function to create list of data surrounding SMP 250-1-1
+smp_250_1_1 <- marsFetchMonitoringData(mars,
+                        target_id = smpId,
+                        ow_suffix = owId,
+                        start_date = start_date,
+                        end_date = end_date,
+                        source = "radarcell",
+                        sump_correct = TRUE,
+                        debug = TRUE)
+
+head(smp_250_1_1$`Level Data`)
+```
+
+### Replicating pwdgsi Functions
+The functions in **pwdgsi** are there to streamline common queries to the MARS database. However, to better understand the code behind the functions and their intended purposes, I'm showing how I would recreate the list object outputted by **marsFetchMonitoringData** using the functions in the R packages **odbc** and  **DBI**.
+```{r, echo = TRUE}
+#Save a vector of tables to find the appropriate ones to query.
+mars_tables <- dbListTables(mars)
+
+#Initiate a null list to populate with dataframes from queries.
+smp250_1_1 <- list()
+
+
+#Query targetId
+targetId <- dbGetQuery(mars,
+                       paste0("SELECT ow_uid FROM fieldwork.ow WHERE smp_id = \'",
+                              smpId,
+                               "\' AND ow_suffix = \'",
+                              owId, "\'")
+                      )
+
+
+#Query level data
+level_data <- dbGetQuery(mars,
+                        paste0(
+                          "SELECT o.dtime_est, o.level_ft, o.ow_uid
+                            FROM data.ow_leveldata_raw o
+                            WHERE o.ow_uid = ", targetId)
+)
+
+smp250_1_1$`Level Data` <- level_data %>%
+                            dplyr::filter(dtime_est >= start_date) %>%
+                           dplyr::filter(dtime_est <= end_date)
+head(smp250_1_1$`Level Data`)
+
+```
+This is close to the level data grabbed by **marsFetchMonitoringData**, but it still needs to be joined to rain gauge data and rainfall events and processed to no longer be "raw" data. I also suspect that filtering for time after the query whether than building it into the query is a more process intensive way of reaching this result.
+
+### Working with MARS data
+Rather than continuing to replicate an existing function, let's inspect the data for 250-1-1. Let's create some summary statistics for these data.
+
+#### Summary Statistics
+
+```{r echo = FALSE}
+event_means <- smp_250_1_1$`Rain Event Data` %>%
+                 summarise(Event_duration_avg_hr = mean(eventduration_hr),
+                           Event_depth_avg_in = mean(eventdepth_in),
+                           Event_peak_int_avg_inhr = mean(eventpeakintensity_inhr),
+                           count = n())
+
+```
+
+The total number of rain events between `r start_date` and `r end_date` is `r event_means$count`.
+
+The mean duration of these `r event_means$count` events was `r round(event_means$Event_duration_avg_hr,2)` hours with a mean peak intensity of `r round(event_means$Event_peak_int_avg_inhr, 2)` in/hr and a mean depth of `r round(event_means$Event_depth_avg_in, 2)` inches. 
+
+
+#### Four Key Metrics
+```{r echo = FALSE}
+
+#Pull snapshot of data from time in question
+snapshot_250_1_1 <- marsFetchSMPSnapshot(con = mars,
+                                         smp_id = smpId,
+                                         ow_suffix = owId,
+                                         request_date = end_date)
+
+
+#join monitoring data in one table
+  obs_data <- dplyr::full_join(monitoringdata[["Level Data"]], monitoringdata[["Rainfall Data"]], 
+                                 by = c("dtime_est", "radarcell_uid", "rainfall_radarcell_event_uid")) #%>% 
+    dplyr::arrange(dtime_est) %>%
+    dplyr::mutate(across(c("level_ft", "ow_uid"), ~ zoo::na.locf(., na.rm = FALSE))) %>%
+    dplyr::mutate(across(c("level_ft", "ow_uid"), ~ zoo::na.locf(., fromLast = TRUE))) %>% 
+    dplyr::mutate(orifice_outflow_ft3 = marsUnderdrainOutflow_cf(dtime_est = dtime_est,
+                                                                waterlevel_ft = level_ft,
+                                                                orifice_height_ft = snapshot$assumption_orificeheight_ft,
+                                                                orifice_diam_in = snapshot$orifice_diam_in))
+
+
+```
+#### Plotting MARS Data
