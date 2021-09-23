@@ -17,6 +17,7 @@ library(sf)
 library(padr)
 #Other stuff
 library(knitr)
+library(ggtext)
 options(stringsAsFactors=FALSE)
 ```
 
@@ -71,9 +72,16 @@ smp_250_1_1 <- marsFetchMonitoringData(mars,
                         ow_suffix = owId,
                         start_date = start_date,
                         end_date = end_date,
-                        source = "radarcell",
-                        sump_correct = TRUE,
-                        debug = TRUE)
+                        source = "radar",
+                        sump_correct = TRUE)
+
+
+
+rain_event_data <- smp_250_1_1[["Rain Event Data"]]
+rain_data <- smp_250_1_1[["Rainfall Data"]] %>% mutate(across(dtime_est), - hours(5))
+rain_data <- smp_250_1_1[["Rainfall Data"]]
+level_data <- smp_250_1_1[["Level Data"]]
+level_data <- smp_250_1_1[["Level Data"]]
 
 head(smp_250_1_1$`Level Data`)
 ```
@@ -90,10 +98,10 @@ smp250_1_1 <- list()
 
 #Query targetId
 targetId <- dbGetQuery(mars,
-                       paste0("SELECT ow_uid FROM fieldwork.ow WHERE smp_id = \'",
+                       paste0("SELECT ow_uid FROM fieldwork.ow WHERE smp_id = '",
                               smpId,
-                               "\' AND ow_suffix = \'",
-                              owId, "\'")
+                               "' AND ow_suffix = '",
+                              owId, "'")
                       )
 
 
@@ -133,18 +141,18 @@ The mean duration of these `r event_means$count` events was `r round(event_means
 
 
 #### Four Key Metrics
-```{r echo = FALSE}
+```{r echo = FALSE, warning= FALSE, message = 'hide'}
 
 #Pull snapshot of data from time in question
-snapshot_250_1_1 <- marsFetchSMPSnapshot(con = mars,
+snapshot <- marsFetchSMPSnapshot(con = mars,
                                          smp_id = smpId,
                                          ow_suffix = owId,
                                          request_date = end_date)
 
 
 #join monitoring data in one table
-  obs_data <- dplyr::full_join(monitoringdata[["Level Data"]], monitoringdata[["Rainfall Data"]], 
-                                 by = c("dtime_est", "radarcell_uid", "rainfall_radarcell_event_uid")) #%>% 
+  obs_data <- dplyr::full_join(smp_250_1_1[["Level Data"]], smp_250_1_1[["Rainfall Data"]], 
+                                 by = c("dtime_est", "radar_uid", "radar_event_uid")) %>% 
     dplyr::arrange(dtime_est) %>%
     dplyr::mutate(across(c("level_ft", "ow_uid"), ~ zoo::na.locf(., na.rm = FALSE))) %>%
     dplyr::mutate(across(c("level_ft", "ow_uid"), ~ zoo::na.locf(., fromLast = TRUE))) %>% 
@@ -153,6 +161,129 @@ snapshot_250_1_1 <- marsFetchSMPSnapshot(con = mars,
                                                                 orifice_height_ft = snapshot$assumption_orificeheight_ft,
                                                                 orifice_diam_in = snapshot$orifice_diam_in))
 
+ #set initial water levels so the simulation starts at the same spot as observed
+    initial_water_levels <- obs_data %>% 
+      dplyr::group_by(radar_event_uid) %>%
+      dplyr::summarize(
+        ft = dplyr::first(level_ft)
+      )
+    
+    initial_water_levels <- initial_water_levels[complete.cases(initial_water_levels), ]
+    
+
+    #observed ---- 
+    
+    #create a summary table of observed data
+    observed_summary <- obs_data %>%
+      dplyr::arrange(dtime_est) %>% 
+      dplyr::filter(is.na(radar_event_uid) == FALSE) %>% #remove rows that had water level data but no event ID
+      #dplyr::filter(radar_event_uid == 159691) %>% 
+      dplyr::group_by(radar_event_uid) %>%
+      dplyr::summarize(
+        
+        #Ow uid
+        ow_uid = ow_uid[1],
+        
+        # first_point = dplyr::first(level_ft), 
+        
+        #Observed storage utilization
+        percentstorageused_peak = marsPeakStorage_percent(waterlevel_ft = level_ft, storage_depth_ft = snapshot$storage_depth_ft) %>% round(4),
+        
+        #Observed relative storage utilization
+        percentstorageused_relative = marsPeakStorage_percent(waterlevel_ft = level_ft - dplyr::first(level_ft), storage_depth_ft = snapshot$storage_depth_ft) %>% round(4),
+        
+        baseline = marsWaterLevelBaseline_ft(dtime_est = dtime_est, 
+                                             level_ft = level_ft),
+        
+        infiltration_inhr = marsInfiltrationRate_inhr(event = radar_event_uid,
+                                                      dtime_est = dtime_est,
+                                                      rainfall_in = rainfall_in,
+                                                      snapshot$dcia_ft2,
+                                                      snapshot$assumption_orificeheight_ft,
+                                                      snapshot$orifice_diam_in,
+                                                      storage_depth_ft = snapshot$storage_depth_ft,
+                                                      #storage_depth_ft = 1,
+                                                      storage_vol_ft3 = snapshot$storage_volume_ft3,
+                                                      waterlevel_ft = level_ft,
+                                                      depth_in = 6),
+        
+        #Draindown time
+        draindown_hr = marsDraindown_hr(dtime_est = dtime_est,
+                                        rainfall_in = rainfall_in,
+                                        waterlevel_ft = level_ft),
+        
+        draindownAssessment = marsDraindownAssessment(level_ft = level_ft, 
+                                                      eventdepth_in =
+                                                      rain_event_data$eventdepth_in[which(rain_event_data$radar_event_uid ==
+                                                                                            radar_event_uid[1])], 
+                                                      designdepth_in = snapshot$storage_volume_ft3/snapshot$dcia_ft2*12, 
+                                                      storage_depth_ft = snapshot$storage_depth_ft, 
+                                                      draindown_hr = draindown_hr, 
+                                                      subsurface = TRUE, 
+                                                      event_id_check = radar_event_uid[1]), 
+        
+        overtop = marsOvertoppingCheck_bool(level_ft, snapshot$storage_depth_ft),
+        
+        peakReleaseRate_cfs = marsPeakReleaseRate_cfs(dtime_est, orifice_outflow_ft3 = orifice_outflow_ft3),
+        
+        orifice_volume_cf = round(sum(orifice_outflow_ft3),0),
+        
+        snapshot_uid = snapshot$snapshot_uid,
+        
+        observed_simulated_lookup_uid = 1
+      )
+
+      obs_sim_summary <- observed_summary
 
 ```
 #### Plotting MARS Data
+Below are the plots for draw down for `r smpId` during the three largest events, by total precipitation depth, measured between the dates `r format(start_date,"%D")` and `r format(end_date, "%D")`.
+
+```{r echo = FALSE, message = 'hide', warning = FALSE}
+
+rain_event_data %>% dplyr::arrange()
+
+#only select the five largest storms
+ for(j in 1:5){
+ # for(j in 1:length(rain_event_data$radar_event_uid)){
+     #j <-1
+     #filter for each event
+       selected_event <- obs_data %>%
+         dplyr::filter(radar_event_uid == rain_event_data$radar_event_uid[j])
+       rain_plot_data <- smp_250_1_1[["Rainfall Data"]] %>%
+         dplyr::filter(radar_event_uid == rain_event_data$radar_event_uid[j])
+
+       #only plot rain events greater than 0.5". this can be modified as desired
+       if(rain_event_data$eventdepth_in[j] > 0.5){
+       #skip plots with errors -900
+       #just plot observed
+        if(obs_sim_summary$infiltration_inhr[j] != -900){
+           #   # plot observed data
+           plot <- marsCombinedPlot(event = rain_event_data$radar_event_uid[j],
+                                    structure_name = paste(smpId, owId),
+                                    obs_datetime = selected_event$dtime_est,
+                                    obs_level_ft = selected_event$level_ft,
+                                    storage_depth_ft = snapshot$storage_depth_ft,
+                                    orifice_show = TRUE,
+                                    orifice_height_ft = snapshot$assumption_orificeheight_ft,
+                                    rainfall_datetime = rain_plot_data$dtime_est,
+                                    rainfall_in = rain_plot_data$rainfall_in,
+                                    #raingage = rain_plot_data$gage_uid,
+                                    obs_infiltration_rate_inhr = obs_sim_summary$infiltration_inhr[j],
+                                    obs_draindown_hr = paste(obs_sim_summary$draindown_hr[j], "| Score:", ... = obs_sim_summary$draindownAssessment[j]),
+                                    obs_percent_storage_relative = round(obs_sim_summary$percentstorageused_relative[j],2))
+
+         # }
+         #save plot
+         #put errors in a different folder
+         #if(obs_sim_summary$infiltration_inhr[j] > -900){
+           # ggplot2::ggsave(paste0(folder, "/", paste(target_id, ow_suffix, rain_event_data$radar_event_uid[j], sep = "_"),".png"), plot = plot, width = 10, height = 8)
+         #}else if(obs_sim_summary$infiltration_inhr[j] != -900){
+          ggplot2::ggsave(paste0(getwd(), "/", paste(smpId, owId, rain_event_data$radar_event_uid[j], sep = "_"),".png"), plot = plot, width = 10, height = 8)
+        # }
+       }
+       }
+ }
+
+```
+
