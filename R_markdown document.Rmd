@@ -18,32 +18,70 @@ library(padr)
 #Other stuff
 library(knitr)
 library(ggtext)
+library(DT)
 options(stringsAsFactors=FALSE)
 ```
 
-## R Markdown
+## R Markdown {.tabset}
 
-Working in R markdown is a familiar experience, even if my skills are a _bit_ rusty. Today we'll be reviewing some data in the **iris** data set including in R, primarily through the use of the **dplyr** and **ggplot** packages, which are a part of the larger **tidyverse** set of packages. Below are a few simple plots of the data without any manipulation.
 
-### Iris Plots
+
+### Working with iris Data
+Working in R markdown is a familiar experience, even if my skills are a _bit_ rusty. Today we'll be reviewing some data in the *iris* data set including in R, primarily through the use of the *dplyr* and *ggplot* packages, which are a part of the larger *tidyverse* set of packages. Below are a few simple plots of the data without any manipulation. Below we have the simplest form of boxplot output for ggplot.
+
 ```{r, echo = FALSE}
+datatable(iris)
+
 iris.box <- ggplot(iris, aes(x = Species, y = Petal.Length)) + geom_boxplot()
 iris.width.plot <- ggplot(iris, aes(x= Sepal.Width, y = Petal.Width, col = Species)) + geom_point()
 
 iris.box
-iris.width.plot
-```
 
-### Iris Data Manipulation
-```{r, echo = FALSE}
 
 ```
 
+Isn't it awful? Why are  the whiskers tied to individual data points? Why can't we see those data points? Doesn't the rest of the box represent descriptive statistics of the dataset? Can't we just see all of the data as well as a representation of the spread in one graph? Also, we need to make the labels clearer and make the whole thing pop. Let's clean it up. We'll need to know some ggplot, some dplyr, and some base stat functions to get there.
 
-## Working with pwdgsi and dplyr
+```{r echo = TRUE} 
+petal.stats <- quantile(iris$Petal.Length)
+#set lower whisker to lower hinge - 1.5*IQR
+petal.whisk.min <- petal.stats[2] - 1.5*(petal.stats[4]-petal.stats[2])
+#set upper whisker to upper hinge + 1.5*IQR
+petal.whisk.max <- petal.stats[4] + 1.5*(petal.stats[4]-petal.stats[2])
+
+petal.stats <- iris %>% group_by(Species) %>%
+               summarize("low.whisk" = quantile(Petal.Length)[2] - 1.5*(quantile(Petal.Length)[4]-quantile(Petal.Length)[2]),
+                         "up.whisk" = quantile(Petal.Length)[4] + 1.5*(quantile(Petal.Length)[4]-quantile(Petal.Length)[2]))
+
+iris.box.better <- ggplot(iris, aes(x = Species, y = Petal.Length)) + geom_boxplot(outlier.shape =NA,
+                                                                                   ymin = petal.stats$low.whisk,
+                                                                                   ymax = petal.stats$up.whisk) +
+                   geom_jitter(width= 0.15, alpha = 0.5, aes(col = Species)) +
+                   xlab("Species") + ylab("Petal Length (cm)") + ggtitle("Spread of Petal Length by Species")
+iris.box.better
+```
+
+Isn't that just better? Now lets make a table summarizing some of what we see here. Once we're done reviewing, we can move on to the MARS data.
+
+```{r echo = FALSE}
+petal.stats.2 <- iris %>% group_by(Species) %>%
+                          summarize("Mean Length (cm)" = mean(Petal.Length),
+                                    "Median Length (cm)" = median(Petal.Length),
+                                    "Lower Quartile (cm)" = quantile(Petal.Length)[2],
+                                    "Upper Quartile (cm)" = quantile(Petal.Length)[4],
+                                    "Minimum Length (cm)" = min(Petal.Length),
+                                    "Maximum Length (cm)" = max(Petal.Length)
+                                    )
+
+datatable(petal.stats.2)
+```
+
+
+
+### Working with MARS Data
 Working with pwdgsi, we are able to grab data from several tables within the **mars_testing** database and save them as lists or database objects in R.
 
-### Running pwdgsi Functions
+#### Running pwdgsi Functions
 ```{r Section 0 - Preamble and database connections, include=FALSE}
 ###Section 0.1: Check parameter validity
 	if(!(params$database %in% c("PostgreSQL35W","mars", "mars_testing"))){
@@ -86,7 +124,7 @@ level_data <- smp_250_1_1[["Level Data"]]
 head(smp_250_1_1$`Level Data`)
 ```
 
-### Replicating pwdgsi Functions
+#### Replicating pwdgsi Functions
 The functions in **pwdgsi** are there to streamline common queries to the MARS database. However, to better understand the code behind the functions and their intended purposes, I'm showing how I would recreate the list object outputted by **marsFetchMonitoringData** using the functions in the R packages **odbc** and  **DBI**.
 ```{r, echo = TRUE}
 #Save a vector of tables to find the appropriate ones to query.
@@ -121,10 +159,10 @@ head(smp250_1_1$`Level Data`)
 ```
 This is close to the level data grabbed by **marsFetchMonitoringData**, but it still needs to be joined to rain gauge data and rainfall events and processed to no longer be "raw" data. I also suspect that filtering for time after the query whether than building it into the query is a more process intensive way of reaching this result.
 
-### Working with MARS data
+#### SMP 250-1-1☺
 Rather than continuing to replicate an existing function, let's inspect the data for 250-1-1. Let's create some summary statistics for these data.
 
-#### Summary Statistics
+##### Summary Statistics
 
 ```{r echo = FALSE}
 event_means <- smp_250_1_1$`Rain Event Data` %>%
@@ -140,8 +178,8 @@ The total number of rain events between `r start_date` and `r end_date` is `r ev
 The mean duration of these `r event_means$count` events was `r round(event_means$Event_duration_avg_hr,2)` hours with a mean peak intensity of `r round(event_means$Event_peak_int_avg_inhr, 2)` in/hr and a mean depth of `r round(event_means$Event_depth_avg_in, 2)` inches. 
 
 
-#### Four Key Metrics
-```{r echo = FALSE, warning= FALSE, message = 'hide'}
+#### View Key Metrics
+```{r echo = FALSE, include = FALSE}
 
 #Pull snapshot of data from time in question
 snapshot <- marsFetchSMPSnapshot(con = mars,
@@ -235,16 +273,33 @@ snapshot <- marsFetchSMPSnapshot(con = mars,
 
       obs_sim_summary <- observed_summary
 
+      #count events with -900 errors
+      error.count <- sum(obs_sim_summary$infiltration_inhr == -900)
+      
+      #check mean depth of these events
+      error.events <- obs_sim_summary %>% dplyr::filter(infiltration_inhr == -900) %>%
+                      left_join(rain_event_data, by = "radar_event_uid")
+      error.mean.size <- error.events %>% summarize(MeanEventDepth_in = mean(eventdepth_in))
+                      
+      
 ```
+
+We've now run some code (courtesy of Nick Manna) that let's us look at the key metrics for each storm event within the period. The table below includes all events within the timeframe. As you can see, `r round((error.count/nrow(obs_sim_summary))*100,1)`% of all events received the -900 error for infiltration rate, with the mean depth of these events being `r error.mean.size` inches. This means the event does not include observation data that approximately equals specified water depth. These events will not be useful for testing system functionality. Instead we should try filtering the table to display the largest storms first. 
+
+```{r echo = FALSE}
+datatable(obs_sim_summary)
+```
+
+
 #### Plotting MARS Data
-Below are the plots for draw down for `r smpId` during the three largest events, by total precipitation depth, measured between the dates `r format(start_date,"%D")` and `r format(end_date, "%D")`.
+Below are the plots for draw down for `r smpId` during the two largest events, by total precipitation depth, measured between the dates `r format(start_date,"%D")` and `r format(end_date, "%D")`.
 
-```{r echo = FALSE, message = 'hide', warning = FALSE}
+```{r echo = FALSE, include=FALSE}
 
-rain_event_data %>% dplyr::arrange()
+rain_event_data %<>% dplyr::arrange(desc(eventdepth_in))
 
 #only select the five largest storms
- for(j in 1:5){
+ for(j in 1:10){
  # for(j in 1:length(rain_event_data$radar_event_uid)){
      #j <-1
      #filter for each event
@@ -284,6 +339,12 @@ rain_event_data %>% dplyr::arrange()
        }
        }
  }
+
+```
+
+```{r echo =  FALSE}
+include_graphics(paste0(getwd(), "/", paste(smpId, owId, rain_event_data$radar_event_uid[1], sep = "_"),".png"))
+include_graphics(paste0(getwd(), "/", paste(smpId, owId, rain_event_data$radar_event_uid[2], sep = "_"),".png"))
 
 ```
 
